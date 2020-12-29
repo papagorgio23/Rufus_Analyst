@@ -1,0 +1,3410 @@
+---
+title: "Rufus Analytics Team"
+author: "Jason Lee"
+date: "12-21-19"
+output: 
+  html_notebook:
+    theme: "readable"
+    toc: yes
+    depth: 1
+
+---
+
+***
+
+<br>
+
+<br>
+
+
+***
+
+# **Question 1:**
+
+**Using data from this webpage alone [Pro Football Reference](https://www.pro-football-reference.com/years/2019/) - do not use any data that can be found only through links on this webpage - build a model which you'll use to determine the probability that the home team wins, and to predict the final score of the game, for each game for [week 15](http://www.nfl.com/schedules/2019/REG15). Send us model details and prediction results. How confident are you in your predictions? If you wanted to get a more quantitative measure of your confidence in your predictions, what might you do?**
+
+
+***
+
+## Scrape Data
+
+
+
+### Pro Football Reference
+
+There are 12 tables on this page:
+
+  1. AFC Standings
+  2. NFC Standings
+  3. AFC Playoff Standings
+  4. NFC Playoff Standings
+  5. Team Offense
+  6. Passing Offense
+  7. Rushing Offense
+  8. Kick & Punt Returns
+  9. Kicking & Punting
+  10. Scoring Offense
+  11. Conversions
+  12. Drive Averages
+
+<br>
+
+I will write a new function that will scrape, clean, and combine all the tables that are on the website. This function will also rename the columns in order to keep the dataset organized.
+
+
+```{r}
+####################################
+###   12 tables on the website   ###
+####################################
+
+#' 1. AFC Standings
+#' 2. NFC Standings
+#' 3. AFC Playoff Standings
+#' 4. NFC Playoff Standings
+#' 5. Team Offense
+#' 6. Passing Offense
+#' 7. Rushing Offense
+#' 8. Kick & Punt Returns
+#' 9. Kicking & Punting
+#' 10. Scoring Offense
+#' 11. Conversions
+#' 12. Drive Averages
+
+
+# function that will scrape, clean, and combine all the tables on the website
+get_data <- function(url) {
+  ## basic scrape has most the tables hidden so a work around is used
+  # data = basic scrape
+  # data1 = more complicated work around for hidden tables
+  
+  # Get the first 2 tables
+  data <- read_html(url) %>%
+    html_table(fill = TRUE)
+  
+  # 1. AFC Standings
+  AFC <- data[[1]] %>%
+    filter(!str_detect(Tm, "AFC"))
+  
+  # 2. NFC Standings
+  NFC <- data[[2]] %>%
+    filter(!str_detect(Tm, "NFC"))
+  
+  # combine AFC & NFC tables
+  Teams <- rbind(AFC, NFC)
+  
+  # grab the last 10 tables
+  data1 <- read_html(url) %>%
+    html_nodes(xpath = '//comment()') %>%
+    html_text() %>%
+    paste(collapse = "") %>%
+    read_html() %>%
+    html_table(fill = TRUE)
+  
+  # 5. Team Offense
+  team_offense <- data1[[3]] %>%
+    fix_headers1(df_name = "tm_off")
+  
+  # 6. Passing Offense
+  pass_offense <- data1[[4]] %>%
+    fix_headers2(df_name = "pass_off")
+  
+  # 7. Rushing Offense
+  rush_offense <- data1[[5]] %>%
+    fix_headers2(df_name = "rush_off")
+  
+  # 8. Kick & Punt Returns
+  kick_returns <- data1[[6]] %>%
+    fix_headers1(df_name = "return")
+  
+  # 9. Kicking & Punting
+  kicking <- data1[[7]] %>%
+    fix_headers1(df_name = "kick")
+  
+  # 10. Scoring Offense
+  scoring <- data1[[8]] %>%
+    fix_headers2(df_name = "score")
+  
+  # 11. Conversions
+  conversion <- data1[[9]] %>%
+    fix_headers1(df_name = "conv")
+  
+  # 12. Drive Averages
+  drives <- data1[[10]] %>%
+    fix_headers1(df_name = "drive") %>%
+    mutate(`drive_Average Drive_Start` = gsub("Own ", "", `drive_Average Drive_Start`))
+  
+  # Join all the data together
+  full_data <- Teams %>%
+    left_join(team_offense, by = c("Tm" = "tm_off_Tm")) %>%
+    left_join(pass_offense, by = c("Tm" = "pass_off_Tm")) %>%
+    left_join(rush_offense, by = c("Tm" = "rush_off_Tm")) %>%
+    left_join(kick_returns, by = c("Tm" = "return_Tm")) %>%
+    left_join(kicking, by = c("Tm" = "kick_Tm")) %>%
+    left_join(scoring, by = c("Tm" = "score_Tm")) %>%
+    left_join(conversion, by = c("Tm" = "conv_Tm")) %>%
+    left_join(drives, by = c("Tm" = "drive_Tm")) %>%
+    replace(., is.na(.), 0)
+  
+  # remove percent sign
+  full_data[, 2:length(full_data)] <-
+    sapply(full_data[, 2:length(full_data)], cleanPercent)
+  
+  # change to numeric data
+  full_data[, 2:length(full_data)] <-
+    sapply(full_data[, 2:length(full_data)], as.numeric)
+  
+  # NAs are zeros on the website. Change missing to 0
+  full_data <- full_data %>%
+    replace(., is.na(.), 0)
+  
+  return(full_data)
+}
+```
+
+
+<br>
+
+The function requires a URL. These 2 lines of code will gather all the data.
+
+```{r}
+# website with data
+url <- "https://www.pro-football-reference.com/years/2019/"
+
+# Scrape all data
+all_data <- get_data(url)
+```
+
+
+<br>
+
+We can view the data to make sure it looks correct.
+
+
+```{r}
+# view data
+head(all_data)
+```
+
+<br>
+
+There are 158 columns total with 32 rows, one for each team. View first half...
+
+```{r}
+str(all_data[,1:80])
+```
+
+<br>
+
+View second half...
+
+```{r}
+str(all_data[,81:158])
+```
+
+<br>
+
+View correlation between all variables
+
+```{r}
+##### Correlation Plot
+library(caret)
+# need to remove near zero variance variables
+nzv_cols <- nearZeroVar(all_data)
+
+## heatmap
+cor_mat <-
+  all_data %>%
+  select(-nzv_cols) %>%
+  select(-c(matches("_G"))) %>%
+  select(-c(matches("_Rk"))) %>%
+  select_if(is.numeric) %>%
+  cor()
+
+# correlation plot
+corrplot(
+  cor_mat,
+  order = "hclust",
+  sig.level = 0.05,
+  tl.cex = 0.35,
+  tl.col = "red",
+  tl.srt = 45,
+  #Text label color and rotation
+  col = colorRampPalette(c("royalblue", "white", "orangered2"))(200)
+)
+```
+
+
+<br>
+
+
+### NFL Schedule
+
+I need to get the remaining NFL schedule. I have a function that will scrape the NFL website for this. This function needs the season and the week numbers. If the week number is `NULL` then it will return the entire season.
+
+
+```{r}
+# get remaining NFL schedule
+nfl_weeks <- scrape_game_ids(2019, weeks = c(16,17))
+```
+
+
+<br>
+
+Check the data
+
+```{r}
+# view data
+nfl_weeks
+```
+
+<br>
+
+All the data looks to be in order. Now I can begin creating a model.
+
+
+***
+
+<br>
+
+## Methodology
+
+I will use a Monte Carlo simulation as my approach to solve this problem. Typically, I use more granular details when building a model for the NFL. However, by limiting the data to this single webpage containing only aggregated offensive stats and scoring data for the season, I am needing to adjust. I decided to simulate each game in the rest of the season 20,000 times.
+
+
+In order to simulate a game, I will create a function that will simulate a single drive. Then I will create another function that will replicate the drive function many times in order to simulate the full game. I will run the simulate game function 20,000 times for every matchup to get a distribution of possible results. This will be able to give us a fairly realistic estimate for the probability that the home team will win, as well as an estimated final score of the game. 
+
+
+
+## Model Details
+
+
+
+
+
+### Data Used
+
+
+**1. Percentage of drives ending with a score - (Success Rate)**  
+
+  + This is found in the Team Offense Table column `tm_off_Sc%`  
+    
+**2. Percentage of drives ending with a turnover - (Turnover Rate)**  
+
+  + This is found in the Team Offense Table column `tm_off_TO%`  
+    
+**3. Percentage of drives ending with a punt - (Punt Rate)**  
+
+  + This metric is derived under the assumption that a drive ends in 1 of 3 ways: Score, Turnover, or Punt. 
+  
+  $$Punt Rate = 1 - Success Rate – Turnover Rate$$  
+    
+**4. Percentage of scores that are touchdowns - (TD Rate)**  
+
+  + This metric uses data from several columns. Team Offense Table columns `tm_off_Passing_TD` and `tm_off_Rushing_TD`. These two columns are added together to give us the total number of offensive touchdowns each team scores. This metric also uses the Kicking and Scoring Table column `kick_Scoring_FGM` to determine how many total offensive scores there were. 
+  
+  $$Total\ TD = Rushing\ TD + Passing\ TD$$
+  
+  <br>
+
+  
+  $$TD\ Rate = \frac{Total\ TD}{Total\ TD + Made\ Field\ Goals}$$
+    
+    
+**5. Percentage of scores that are field goals - (FG Rate)**  
+
+  + This metric uses the same tables and columns as the last metric but the number of made field goals is the numerator. Because the success rate metric only accounts for scores, we do not need to worry about a kicker's FG percentage.
+
+  $$FG\ Rate = \frac{Made\ Field\ Goals}{Total\ TD + Made\ Field\ Goals}$$
+  
+**6. Average number of drives per game**  
+
+  + This metric uses the Drives table column `drive_#Dr`
+
+  $$Avg\ \#\ Drives = \frac{Total\ Drives}{Games}$$
+  
+**7. League average made extra point**  
+
+  + This metric uses the Kicking and Scoring Table column `kick_Scoring_XPA` and `kick_Scoring_XPM`. This is a constant at 93.5%.
+
+  $$League\ Avg\ ExPt\ Rate = \frac{Total\ ExPts\ Made}{Total\ ExPt\ Attempts}$$
+
+<br>
+
+I need to filter and transform the data in order to use it in the model. 
+
+
+```{r}
+# get only useful stats for the simulation
+monte <- all_data %>%
+  select(
+    Tm,
+    `tm_off_Sc%`,
+    `tm_off_TO%`,
+    tm_off_Passing_TD,
+    tm_off_Rushing_TD,
+    `drive_#Dr`,
+    kick_Scoring_FGM
+  ) %>%
+  mutate(
+    total_TD = tm_off_Passing_TD + tm_off_Rushing_TD,
+    Punt_perc = (100 - `tm_off_Sc%` - `tm_off_TO%`) / 100,
+    TD_ratio = round(total_TD / (total_TD + kick_Scoring_FGM), 3),
+    FG_ratio = round(kick_Scoring_FGM / (total_TD + kick_Scoring_FGM), 3),
+    Num_Drives = round(`drive_#Dr` / 14),
+    Tm = convertTeamAbbreviation(Tm)
+  ) %>%
+  rename(Scoring_perc = `tm_off_Sc%`,
+         Turnover_perc = `tm_off_TO%`) %>%
+  mutate(Scoring_perc = Scoring_perc / 100,
+         Turnover_perc = Turnover_perc / 100) %>%
+  select(-c(
+    tm_off_Passing_TD,
+    tm_off_Rushing_TD,
+    `drive_#Dr`,
+    total_TD,
+    kick_Scoring_FGM
+  ))
+
+monte
+```
+
+<br>
+
+### Drive Function
+
+This function will simulate a single offensive drive. It will take an individual team as an input. The function will use the team name to filter to the relevant statistics. The function will initialize the score equal to zero. It will randomly sample from our 3 drive result options (Score, Turnover, Punt) based on the team’s probabilities. 
+
+If the result is a Score then the function will randomly sample whether the score was a touchdown or a field goal based on the team’s probabilities. 
+
+If the Score result is a touchdown then the function will randomly sample whether the extra point kick is made or not based on the league average rate of 93.5%.
+
+The function will return the number of points scored for the drive.
+
+
+```{r}
+# Simulate drive result
+sim_drive <- function(team = "NE") {
+  # get stats needed
+  team_stats <- monte %>%
+    filter(Tm == team)
+  
+  # get probabilities
+  Scoring_perc <- team_stats$Scoring_perc
+  Punt_perc <- team_stats$Punt_perc
+  Turnover_perc <- team_stats$Turnover_perc
+  TD_ratio <- team_stats$TD_ratio
+  FG_ratio <- team_stats$FG_ratio
+  
+  # initialize score
+  score <- 0
+  
+  # 3 possible results of drive: Team scores, Team punts, Turnover
+  drive_result <- sample(
+    size = 1,
+    x = c("Score", "Turnover", "Punt"),
+    prob = c(Scoring_perc, Turnover_perc, Punt_perc)
+  )
+  
+  # determine if score was a Touchdown or Field Goal
+  if (drive_result == "Score") {
+    score_type <- sample(
+      size = 1,
+      x = c("TD", "FG"),
+      prob = c(TD_ratio, FG_ratio)
+    )
+    
+    
+    # Get points
+    if (score_type == "TD") {
+      # kick the extra point
+      extra_point <- sample(
+        size = 1,
+        x = c("Make", "Miss"),
+        prob = c(0.935, 0.065)
+      ) # league average make extra point is 93.5%
+      
+      
+      score <- ifelse(extra_point == "Make", 7, 6)
+      
+    } else {
+      # if the score wasn't a touchedown then it was a field goal
+      score <- 3
+    }
+  }
+  return(score)
+}
+
+# test to see if it works
+replicate(10, sim_drive())
+```
+
+<br>
+
+
+### Game Function
+
+This function will simulate a single game. It will get the average number of drives that the home and away team get in a game. It will replicate the simulate drive function with their respective average number of drives. It will calculate the total score for each team and return this in a dataframe.
+
+Inputs:
+
+  1. Home Team
+  2. Away Team
+  
+  
+```{r}
+# function to simulate game
+sim_game <- function(home_team = "NE",
+                     away_team = "BUF") {
+  ### This function will simulation a full NFL game and return the score of each team
+  
+  # get number of drives for each team needed
+  home_drives <- monte %>%
+    filter(Tm == home_team) %>%
+    pull(Num_Drives)
+  
+  # get number of drives for each team needed
+  away_drives <- monte %>%
+    filter(Tm == away_team) %>%
+    pull(Num_Drives)
+  
+  # initialize scores
+  home_score <- 0
+  away_score <- 0
+  
+  # simulate and compute score for each home team drive in the game
+  home_score <- sum(replicate(home_drives, sim_drive(home_team)))
+  
+  # simulate and compute score for each away team drive in the game
+  away_score <- sum(replicate(away_drives, sim_drive(away_team)))
+  
+  # gather simulations together in a dataframe
+  result <-
+    data.frame(
+      home_team = home_team,
+      away_team = away_team,
+      home_score = home_score,
+      away_score = away_score
+    )
+  
+  # return results
+  return(result)
+}
+
+sim_game()
+```
+
+
+<br>
+
+## Monte Carlo Simulation
+
+All of the functions are built to allow me to run the Monte Carlo Simulation as many times as I need. I have selected 20,000 simulations in order to provide a large enough sample size to have confidence in the results.
+ 
+This code will run the 20,000 simulations of the final 2 weeks of the season.
+
+
+
+```{r}
+#### SET UP SIM FOR ALL TEAMS
+### SET UP SIM
+set.seed(123)
+sim_results <- data.frame()
+num_sims = 20000
+i = 1
+
+# start progress bar
+pb <- txtProgressBar(min = 0, max = 32, style = 3)
+for (j in 1:nrow(nfl_weeks)) {
+  # get matchup
+  home <- nfl_weeks$home_team[j]
+  away <- nfl_weeks$away_team[j]
+  
+  while (i <= num_sims) {
+    # simulate a single game
+    game_result <- sim_game(home_team = home, away_team = away)
+    
+    # get score differential and attach game id and week
+    game_result <- game_result %>%
+      mutate(
+        Home_line = away_score - home_score,
+        game_id = nfl_weeks$game_id[j],
+        week = nfl_weeks$week[j]
+      )
+    
+    # tag game result with the simulation number
+    game_result$Sim <- i
+    
+    # combine current simulation with previous simulations
+    sim_results <- rbind(sim_results, game_result)
+    
+    # update sim number
+    i <- i + 1
+  }
+  
+  # reset the sim number for the next team
+  i <- 1
+  
+  # combine current simulations for team with previous simulations for teams
+  sim_results <- rbind(sim_results, tmp)
+  
+  # update pregress bar
+  setTxtProgressBar(pb, j)
+  print(paste0("  --  Finished with 20,000 simulations of ", home, " vs ", away, "!"))
+}
+# end progress bar
+close(pb)
+```
+
+***
+
+<br>
+
+
+## Results
+
+<br>
+
+I need to add flags to count how many times a team won, lost, or tied.
+
+
+```{r}
+# Add flags for win, loss, and tie
+sim_results <- sim_results %>%
+  mutate(
+    Home_win = if_else(home_score > away_score, 1, 0),
+    Away_win = if_else(away_score > home_score, 1, 0),
+    Tie = if_else(away_score == home_score, 1, 0)
+  )
+```
+
+
+<br>
+
+
+This next bit of code will aggregate the 20,000 simulations by game.
+
+
+```{r}
+## simulation results team
+sim_results_team <- sim_results %>%
+  group_by(game_id, week) %>%
+  summarise(
+    home_team = last(home_team),
+    away_team = last(away_team),
+    home_wins = sum(Home_win),
+    away_wins = sum(Away_win),
+    ties = sum(Tie),
+    home_win_prob = round(sum(home_wins) / n(), 4),
+    away_win_prob = round(sum(away_wins) / n(), 4),
+    tie_prob = round(ties / n(), 4),
+    home_score_med = median(home_score),
+    away_score_med = median(away_score),
+    home_score_avg = round(mean(home_score), 2),
+    away_score_avg = round(mean(away_score), 2),
+    home_score_sd = sd(home_score),
+    away_score_sd = sd(away_score),
+    home_line_med = median(Home_line),
+    home_line_avg = round(mean(Home_line), 2),
+    home_line_sd = sd(Home_line)
+  ) %>%
+  select(1:4, 8:10, everything())
+```
+
+
+
+<br>
+
+
+I need to get the team colors and aggregated metrics joined together to plot the results.
+
+```{r}
+sim_plot_data <- sim_results %>%
+  left_join(sim_results_team,
+            by = c("home_team", "away_team", "game_id", "week")) %>%
+  left_join(home_colors, by = c("home_team" = "home_name")) %>%
+  left_join(away_colors, by = c("away_team" = "away_name")) %>%
+  mutate(label = paste0("Week ", week, ":  ", away_team, "  @  ", home_team))
+```
+
+
+
+
+
+```{r}
+########### FINAL PLOTS
+
+### Break the games out in groups of 4 to plot.
+games <- sort(unique(sim_plot_data$label))
+games1 <- games[1:4]
+games2 <- games[5:8]
+games3 <- games[9:12]
+games4 <- games[13:16]
+games5 <- games[17:20]
+games6 <- games[21:24]
+games7 <- games[25:28]
+games8 <- games[29:32]
+
+
+
+
+## Plot simulations in groups of 4 games because of the size
+games1_plots <- lapply(games1,
+                       function(game_label) {
+                         # Pull out the teams in the division
+                         new_plot <- sim_plot_data %>%
+                           filter(label == game_label)
+                         
+                         # pull out data to add as text to plots
+                         home_team <- new_plot$home_team[[1]]
+                         away_team <- new_plot$away_team[[1]]
+                         home_avg <- new_plot$home_score_avg[[1]]
+                         away_avg <- new_plot$away_score_avg[[1]]
+                         game_line <- new_plot$home_line_avg[[1]]
+                         home_win <- new_plot$home_win_prob[[1]]
+                         
+                         # plot games where the home team is favored
+                         if (home_avg >= away_avg) {
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1 ,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                           
+                         } else {
+                           # plot games where the away team is favored
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                         }
+                       })
+
+
+games2_plots <- lapply(games2,
+                       function(game_label) {
+                         # Pull out the teams in the division
+                         new_plot <- sim_plot_data %>%
+                           filter(label == game_label)
+                         
+                         # pull out data to add as text to plots
+                         home_team <- new_plot$home_team[[1]]
+                         away_team <- new_plot$away_team[[1]]
+                         home_avg <- new_plot$home_score_avg[[1]]
+                         away_avg <- new_plot$away_score_avg[[1]]
+                         game_line <- new_plot$home_line_avg[[1]]
+                         home_win <- new_plot$home_win_prob[[1]]
+                         
+                         # plot games where the home team is favored
+                         if (home_avg >= away_avg) {
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1 ,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                           
+                         } else {
+                           # plot games where the away team is favored
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                         }
+                       })
+
+games3_plots <- lapply(games3,
+                       function(game_label) {
+                         # Pull out the teams in the division
+                         new_plot <- sim_plot_data %>%
+                           filter(label == game_label)
+                         
+                         # pull out data to add as text to plots
+                         home_team <- new_plot$home_team[[1]]
+                         away_team <- new_plot$away_team[[1]]
+                         home_avg <- new_plot$home_score_avg[[1]]
+                         away_avg <- new_plot$away_score_avg[[1]]
+                         game_line <- new_plot$home_line_avg[[1]]
+                         home_win <- new_plot$home_win_prob[[1]]
+                         
+                         # plot games where the home team is favored
+                         if (home_avg >= away_avg) {
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1 ,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                           
+                         } else {
+                           # plot games where the away team is favored
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                         }
+                       })
+
+games4_plots <- lapply(games4,
+                       function(game_label) {
+                         # Pull out the teams in the division
+                         new_plot <- sim_plot_data %>%
+                           filter(label == game_label)
+                         
+                         # pull out data to add as text to plots
+                         home_team <- new_plot$home_team[[1]]
+                         away_team <- new_plot$away_team[[1]]
+                         home_avg <- new_plot$home_score_avg[[1]]
+                         away_avg <- new_plot$away_score_avg[[1]]
+                         game_line <- new_plot$home_line_avg[[1]]
+                         home_win <- new_plot$home_win_prob[[1]]
+                         
+                         # plot games where the home team is favored
+                         if (home_avg >= away_avg) {
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1 ,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                           
+                         } else {
+                           # plot games where the away team is favored
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                         }
+                       })
+
+
+games5_plots <- lapply(games5,
+                       function(game_label) {
+                         # Pull out the teams in the division
+                         new_plot <- sim_plot_data %>%
+                           filter(label == game_label)
+                         
+                         # pull out data to add as text to plots
+                         home_team <- new_plot$home_team[[1]]
+                         away_team <- new_plot$away_team[[1]]
+                         home_avg <- new_plot$home_score_avg[[1]]
+                         away_avg <- new_plot$away_score_avg[[1]]
+                         game_line <- new_plot$home_line_avg[[1]]
+                         home_win <- new_plot$home_win_prob[[1]]
+                         
+                         # plot games where the home team is favored
+                         if (home_avg >= away_avg) {
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1 ,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                           
+                         } else {
+                           # plot games where the away team is favored
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                         }
+                       })
+
+games6_plots <- lapply(games6,
+                       function(game_label) {
+                         # Pull out the teams in the division
+                         new_plot <- sim_plot_data %>%
+                           filter(label == game_label)
+                         
+                         # pull out data to add as text to plots
+                         home_team <- new_plot$home_team[[1]]
+                         away_team <- new_plot$away_team[[1]]
+                         home_avg <- new_plot$home_score_avg[[1]]
+                         away_avg <- new_plot$away_score_avg[[1]]
+                         game_line <- new_plot$home_line_avg[[1]]
+                         home_win <- new_plot$home_win_prob[[1]]
+                         
+                         # plot games where the home team is favored
+                         if (home_avg >= away_avg) {
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1 ,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                           
+                         } else {
+                           # plot games where the away team is favored
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                         }
+                       })
+
+
+games7_plots <- lapply(games7,
+                       function(game_label) {
+                         # Pull out the teams in the division
+                         new_plot <- sim_plot_data %>%
+                           filter(label == game_label)
+                         
+                         # pull out data to add as text to plots
+                         home_team <- new_plot$home_team[[1]]
+                         away_team <- new_plot$away_team[[1]]
+                         home_avg <- new_plot$home_score_avg[[1]]
+                         away_avg <- new_plot$away_score_avg[[1]]
+                         game_line <- new_plot$home_line_avg[[1]]
+                         home_win <- new_plot$home_win_prob[[1]]
+                         
+                         # plot games where the home team is favored
+                         if (home_avg >= away_avg) {
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1 ,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                           
+                         } else {
+                           # plot games where the away team is favored
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                         }
+                       })
+
+games8_plots <- lapply(games8,
+                       function(game_label) {
+                         # Pull out the teams in the division
+                         new_plot <- sim_plot_data %>%
+                           filter(label == game_label)
+                         
+                         # pull out data to add as text to plots
+                         home_team <- new_plot$home_team[[1]]
+                         away_team <- new_plot$away_team[[1]]
+                         home_avg <- new_plot$home_score_avg[[1]]
+                         away_avg <- new_plot$away_score_avg[[1]]
+                         game_line <- new_plot$home_line_avg[[1]]
+                         home_win <- new_plot$home_win_prob[[1]]
+                         
+                         # plot games where the home team is favored
+                         if (home_avg >= away_avg) {
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1 ,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                           
+                         } else {
+                           # plot games where the away team is favored
+                           new_plot %>%
+                             ggplot(aes(x = home_score)) +
+                             geom_histogram(aes(
+                               color = last(home_primary),
+                               fill = last(home_primary)
+                             ),
+                             binwidth = 1,
+                             alpha = 0.8) +
+                             scale_color_identity() +
+                             scale_fill_identity() +
+                             geom_histogram(
+                               aes(
+                                 x = away_score,
+                                 color = last(away_primary),
+                                 fill = last(away_primary)
+                               ),
+                               binwidth = 1,
+                               alpha = 0.8
+                             ) +
+                             geom_vline(aes(
+                               xintercept = median(away_score_avg),
+                               color = last(away_primary)
+                             )) +
+                             geom_vline(aes(
+                               xintercept = median(home_score_avg),
+                               color = last(home_primary)
+                             )) +
+                             annotate(
+                               "label",
+                               x = home_avg - 0.5,
+                               y = 1350,
+                               hjust = 1,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(home_team, ": ", home_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = away_avg + 0.5,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 4,
+                               family = "Impact",
+                               label = paste0(away_team, ": ", away_avg)
+                             ) +
+                             annotate(
+                               "label",
+                               x = 38,
+                               y = 1350,
+                               hjust = 0,
+                               vjust = 1,
+                               size = 5,
+                               fontface = "bold",
+                               family = "Impact",
+                               label = paste0(
+                                 "Home Line: ",
+                                 game_line,
+                                 "\nHome Win Probability: ",
+                                 home_win * 100,
+                                 "%"
+                               )
+                             ) +
+                             labs(x = "Score",
+                                  y = "Count") +
+                             facet_wrap( ~ label) +
+                             theme_538() +
+                             theme(strip.text = element_text(hjust = 0))
+                         }
+                       })
+```
+
+
+```{r}
+# Display each 2x2 grid of plots
+plot_grid(plotlist = games1_plots, ncol = 2, align = "hv")
+plot_grid(plotlist = games2_plots, ncol = 2, align = "hv")
+plot_grid(plotlist = games3_plots, ncol = 2, align = "hv")
+plot_grid(plotlist = games4_plots, ncol = 2, align = "hv")
+plot_grid(plotlist = games5_plots, ncol = 2, align = "hv")
+plot_grid(plotlist = games6_plots, ncol = 2, align = "hv")
+plot_grid(plotlist = games7_plots, ncol = 2, align = "hv")
+plot_grid(plotlist = games8_plots, ncol = 2, align = "hv")
+```
+
+<br>
+
+### Plots
+
+<br>
+
+#### **Week 16**
+
+<br>
+
+![](week16-1.png)
+
+![](week16-2.png)
+
+![](week16-3.png)
+
+![](week16-4.png)
+
+
+***
+
+<br>
+
+#### **Week 17**
+
+<br>
+
+<br>
+
+![](week17-1.png)
+
+![](week17-2.png)
+
+![](week17-3.png)
+
+![](week17-4.png)
+
+<br>
+
+### Table
+
+
+```{r}
+## TABLE
+# create table
+results_table <- sim_results_team %>% 
+  ungroup() %>% 
+  mutate(week = paste0("Week ", week),
+         week = factor(week, levels = c("Week 17", "Week 16"))) %>% 
+  arrange(desc(home_win_prob)) %>%
+  select(home_team, away_team, home_line_avg, home_win_prob, away_win_prob, tie_prob, 
+         home_score_avg, home_score_med, away_score_avg, away_score_med, week) %>% 
+  group_by(week) %>% 
+  gt()
+
+# fix style
+results_table %>% 
+  fmt_percent(columns = vars(home_win_prob, away_win_prob, tie_prob), decimals = 1) %>%
+  tab_header(
+    title = "Monte Carlo Simulation Win Probability",
+    subtitle = "20,000 simulations"
+  ) %>% 
+  tab_spanner(
+    label = "Win Probabilities",
+    columns = vars(home_win_prob, away_win_prob, tie_prob)
+  ) %>% 
+  tab_spanner(
+    label = "Median Scores",
+    columns = vars(home_score_med, away_score_med)
+  ) %>% 
+  tab_spanner(
+    label = "Avg. Scores",
+    columns = vars(home_score_avg, away_score_avg)
+  ) %>% 
+  cols_label(
+    home_team = "Home Team",
+    away_team = "Away Team",
+    home_line_avg = "Home Line",
+    home_win_prob = "Home Win %",
+    away_win_prob = "Away Win %",
+    tie_prob = "Tie %",
+    home_score_avg = "Avg. Home Score",
+    home_score_med = "Med. Home Score",
+    away_score_avg = "Avg. Away Score",
+    away_score_med = "Med. Away Score"
+  ) %>%
+  cols_align(
+    align = "center"
+  ) %>%
+  tab_source_note(
+    source_note = "Table: Jason Lee  |  Source Data: Pro Football Reference"
+  )
+
+```
+
+
+
+
+
+
+## Improvements
+
+
+If I were a betting man, which I am, I would not bet the games based on these results. However, I feel comfortable with the holistic approach, but there would need to be more work done before I would bet the games. I would need to add in adjustments for each team's defensive rates. As it’s built now, this model would be closer to simulating the final score for each team’s offense against an average defense. This model should do a decent job accounting for randomness in the statistics but knowing the weekly variance in each of the probabilities used would allow me to add in a little more randomness. Ultimately, I would need to backtest the model to see how it performed and what adjustments could actually help improve the results.
+
+
+
+***
+
+<br>
+
+
+
+
+# **Question 2:**
+
+**Using the data in the attached file (‘cfb_games_for_ml_task’), and no other data, you are tasked with coming up with win probability forecasts for future college football games based on the point spread (and total, if you so desire).**
+
+**Be conscious of overfitting to historical biases. Also be aware that since scoring is (usually) in increments of 3 and 7, certain score differentials will occur with greater frequency than others. This should have an impact on your analysis.**
+
+
+**For simplicity, assume that each line is 50% cover probability.**
+
+
+***
+
+
+<br>
+
+### Load Data
+
+
+```{r}
+# Load data
+college <- read_delim("Data/cfb_games_for_ml_task.csv", 
+                      "\t", escape_double = FALSE, trim_ws = TRUE)
+```
+
+<br>
+
+
+### View Data
+
+
+```{r}
+# view data
+head(college)
+```
+
+
+<br>
+
+
+### Feature Engineering
+
+
+
+
+```{r}
+# add score diff, error, and implied scores
+college <- college %>%
+  mutate(score_diff = opp_score - tm_score,
+         error_rate = score_diff - tm_line,
+         abs_error = abs(error_rate),
+         home_win = ifelse(score_diff < 0, 1, 0),
+         imp_tm_score = (total/2) - (tm_line/2),
+         imp_opp_score = (total/2) + (tm_line/2))
+```
+
+
+### View Distribution and summary statistics
+
+```{r}
+summary(college)
+```
+
+<br>
+
+
+```{r}
+# plot score difference
+college %>%
+  ggplot() +
+  geom_histogram(aes(x = score_diff), binwidth = 1, alpha = 0.9, fill = "red", color = "black") +
+  theme_bw() +
+  geom_hline(yintercept = 0, size = 1) +
+  labs(
+    x = "\nScore Differential",
+    y = "Count",
+    title = "Final Game Margin Distribution",
+    subtitle = "2005-2019",
+    caption = "Data: @RufusPeabody"
+  )
+```
+
+
+
+
+### Error Rates
+
+This plot shows the difference between the spread and the actual game margin.
+
+
+```{r}
+college %>%
+  ggplot() +
+  geom_histogram(aes(x = error_rate), binwidth = 1, alpha = 0.9, fill = "blue", color = "black") +
+  scale_fill_manual(values = c("red", "blue")) +
+  theme_bw() +
+  geom_hline(yintercept = 0, size = 1) +
+  labs(
+    x = "\nPoints",
+    y = "Count",
+    title = "Difference in Spread vs. Actual Score Distribution",
+    subtitle = "2005-2019",
+    caption = "Data: @RufusPeabody"
+  )
+
+```
+
+
+<br>
+
+
+
+```{r}
+DescTools::Desc(college$error_rate)
+```
+
+
+```{r}
+# Calculate standard deviation of the error
+sd_ncaaf <- sd(college$error_rate, na.rm = TRUE)
+print(paste0("The standard deviation is ", round(sd_ncaaf,2)))
+```
+
+
+<br>
+
+These results resemble a normal distribution. Like Hal Stern from Stanford proved in his paper ["The Probability of Winning a Football Game as a Function of the Pointspread"](https://statistics.stanford.edu/sites/g/files/sbiybj6031/f/COV%20NSF%2059.pdf), the margin of victory over the point spread, or error rate here, is not significantly different than a normal distribution with a $\sigma$ of 15.51. 
+
+
+<br>
+
+
+
+### Win Probability Model
+
+
+
+
+```{r}
+### Assuming that a Tie = 50% win prob
+
+# function to calculate win prob
+win_prob_1 <- function(home_line = -3, sd = 15.51){
+  
+  # change sign of the line number
+  home_line <- home_line * -1
+  
+  # prob they win game in regulation
+  winner <- 1 - (pnorm(.5, mean = home_line, sd = sd))
+  
+  ## probabiltiy of a tie... Big number has to come first and subtract the small number
+  tie_prob <- (pnorm(.5, mean = home_line, sd = sd)) - (pnorm(-.5, mean = home_line, sd = sd))
+  
+  # add the probability of winning in overtime
+  winner <- winner + (tie_prob*0.5)
+  
+  # return the probability
+  win_message <- paste0("With a home spread of ", home_line*-1, ", there is a ", round(winner * 100, 2), "% likelihood that the home team will win!")
+  return(win_message)
+}
+
+win_prob_1(home_line = -3)
+```
+
+
+```{r}
+# create a win probability dataframe by spread
+game_lines <- seq(-40, 40, by = 0.5)
+line_win <- tibble(game_lines, win_prob = NA)
+line_win$win_prob <- win_prob(line_win$game_lines)
+
+
+# we'll cap the spread at 40 both ways for historical lines
+avg_win_prob <- college %>% 
+  mutate(game_lines = ifelse(tm_line >= 40, 40, tm_line),
+         game_lines = ifelse(game_lines <= -40, -40, game_lines)) %>% 
+  group_by(game_lines) %>% 
+  summarise(Games = n(),
+            Hist_Win_Prob = mean(home_win)) %>% 
+  arrange(game_lines)
+
+# join historical with win probs
+line_win <- line_win %>% 
+  left_join(avg_win_prob, by = "game_lines")
+```
+
+
+```{r}
+# win probabilities by spread -40 to +40
+line_win %>% 
+  ggplot() +
+  geom_line(aes(x = game_lines, y = win_prob)) +
+  geom_hline(yintercept = 0.5, color = "red", linetype = 3) +
+  labs(
+    x = "\nSpread",
+    y = "Win Probability",
+    title = "Win Probability Chart by Spread",
+    caption = "\n\nBased on normal random distribution with standard deviation of 15.75"
+  ) +
+  scale_x_continuous(limits = c(-40, 40),
+                     breaks = seq(-40, 40, by = 5)) +
+  theme_bw()
+```
+
+
+
+
+## Historical Win Rate vs. Predicted Win Probability 
+
+
+```{r}
+# win probabilities by spread -40 to +40 with Actuals
+line_win %>% 
+  ggplot() +
+  geom_area(aes(x = game_lines, y = win_prob), fill = "lightblue", color = "skyblue", alpha = 0.5) +
+  geom_line(aes(x = game_lines, y = Hist_Win_Prob), color = "black") +
+  geom_hline(yintercept = 0.5, color = "red", linetype = 3) +
+  labs(
+    x = "\nSpread",
+    y = "Win Probability",
+    title = "Win Probability Chart by Home Spread",
+    subtitle = "Historical Win Rate vs. Predicted Win Probability",
+    caption = "\n\nBased on a normal distribution with the mean equal to the home spread and a standard deviation of 15.75"
+  ) +
+  scale_x_continuous(limits = c(-40, 40),
+                     breaks = seq(-40, 40, by = 5)) +
+  theme_bw()
+```
+
+
+<br>
+
+```{r}
+line_win %>% 
+  mutate(win_prob = round(win_prob, 4),
+         Hist_Win_Prob = round(Hist_Win_Prob, 4)) %>% 
+  select(game_lines, win_prob, Hist_Win_Prob, Games) %>% 
+  rename(`Game Spread` = game_lines,
+         `Predicted Win Prob` = win_prob,
+         `Historical Win Prob` = Hist_Win_Prob,
+         `Sample Size` = Games) %>% 
+  gt()
+```
+
+
+
+***
+
+<br>
+
+
+
+
+# **Question 4:**
+
+**You are interested in building profitable gambling models in soccer, despite having no experience with soccer data and little knowledge of the sport. A friend recommends this paper to you, which you read: [Here](https://arxiv.org/pdf/1802.07127.pdf)**
+
+**Now it's time to create your own team and player ratings, predict game outcomes, etc., with an eye to making profitable bets. Do you use the framework used in this paper? Why or why not? If not, what framework do you use?**
+
+
+***
+
+
+**Answer:**
+
+I think that their framework is sound for attributing values to specific actions over the course of a game. I appreciate how they incorporate the context of the action into the value. However, there are several potential issues that the authors bring up that might make me hesitant with using this framework for betting. They acknowledge that it is very difficult to compare player values between various leagues. They also acknowledge that it is even very difficult to compare player values between teams in the same league. There will be a high correlation between most of the players on a good team. Mid to lower tier players will appear to be good players when they are only benefitting from the system and the great players around them. If they were traded to another team the “value added” will not necessarily translate to the new team. 
+
+Despite these challenges, I believe that the cumulative value a team generates may have predictive power moving forward. A team that performs higher value actions consistently will put themselves in advantageous situations that have a higher likelihood of scoring a goal or stopping an opponent’s goal. If I were to build a soccer betting model, I would need to investigate the player values much closer to see the impact.
+
+My approach to building a new model would be similar to other predictive models I’ve built. I would have main categories that are important to the makeup of a team: Offense, Defense, Goalie, Style, Coaching, etc. I would test out different metrics for each category to determine which one or combinations generate the best results and make intuitive sense.
+ 
+ 
+Sample Inputs for the model:
+
+
+* Offense - 
+
+  1. Forwards’ strength (potentially using an aggregated VAEP) 
+  2. xGoals
+  3. xAssists
+  4. etc.
+  
+  
+<p>
+
+* Control -
+
+  1. Pass accuracy 
+  2. Mid field strength 
+  
+<p>
+
+
+* Defense -
+
+  1. Pass accuracy against
+  2. Shots against
+  3. xGoals against
+  4. Defender strength
+  
+<p>
+
+  
+* Goalie - 
+
+  1. Fifa ratings
+  2. Goals allowed
+  3. Goals stopped above expectation  
+  
+<p>
+
+  
+* Coaching - 
+
+  1. Coach experience 
+  2. Style
+  3. Formation 
+  
+<p>
+
+I’d need to play around with this to know for sure. There are also the FIFA video game player/team ratings that can be incorporated into the model. 
+
+https://www.kaggle.com/stefanoleone992/fifa-20-complete-player-dataset 
+
+https://sofifa.com/players. 
+
+
+From my experience building models for other sports, there may be several machine learning algorithms that perform well but combining and weighting each individual model’s output to get the final bet prediction might work best. This ensemble approach is how I’ve done NFL and NCAAF. I have also seen a lot of the prediction models for soccer that are simple Poisson models to determine the probability of possible goals scored for each team. Even though this is very basic, it could be something to test out in conjunction with the other approach.
+
+
+
+
+***
+
+
+<br>
+
+
+# **Question 5:**
+
+
+**Give an example of a project you've done where you've had to clean, organize, combine multiple datasets. Think about something you’ve done that would be relevant if you were putting together a database of college, G League, international and NBA players, recognizing that some players end up spending some time in all of those four places, have many seasons of data associated with them, and also have non game playing metrics that might be of interest.**
+
+***
+
+**Answer:**
+
+
+I have a lot of experience scraping data from various websites, cleaning, and combining them in order to perform analysis and predictive modeling. In order to run the current models at A.I. Sports, I have created data pipelines that gather, combine, clean, and predict the results for each week. I would say scraping and cleaning data from the internet is one of my better programming skills. I always enjoy digging through the backend code to find the good stuff. 
+
+As for the database, I’m not a data engineer by trade but I have a lot of experience working within databases in my career. As a data scientist/analyst for the last 8+ years I have experience working with all different types of databases Microsoft SQL server, MySQL, PostGreSQL, and Google BigQuery databases regularly. I have used both SQL and NoSQL. I have also set up a few smaller databases using PostGres and MySQL. 
+
+<br>
+
+## Basketball Database
+
+As for the Database structure for Basketball… This is how I would set it up:
+
+<br>
+
+
+![](Rufus BBall DB.png)
+
+
+
+<br>
+
+*	**League Table:**
+
+    +	Contains all the details of the specific league: How many games are played, length of games, number of teams in league, etc.
+
+<br>
+
+
+*	**Team Table:**
+
+    +	Contains all the details about each team: Location, Founding Date, etc.
+
+<br>
+
+
+*	**Player Table:**
+
+    +	Details about player: Age, Height, Weight, Home town, etc. 
+
+<br>
+
+
+*	**Change Teams Table:**
+
+    +	We can’t have a many to many relationship between the teams and players table so we need this join table to break it up. There will be a unique combination key created by the player ID and the team ID.
+
+<br>
+
+
+*	**Game Table:**
+
+    +	Game details and results: Date, Home and Away Teams, Opening Line, Closing Line, Q1 score, Q2 Score, Q3 Score, Q4 Score, OT, etc. 
+
+<br>
+
+
+*	**Play by Play Table**
+
+    +	This table contains the play by play details of each game: Time left, Event that took place, Home and Away Score, etc.
+
+<br>
+
+
+*	**Player by Game Table**
+
+    +	This table will have all your aggregated statistics for each player for each game: Points, Rebounds, +/-, Usage, Mins, FGM, FGA, 3PM, 3PA, Starter flag, etc.
+
+<br>
+
+
+*	**Player by Play Table**
+
+    +	This table will have your player data at the play level. This will allow you to filter out garbage time or add context behind the event/stat that took place. For any given play there may be multiple players involved. This table will hold each individual player’s statistics for the specific play: Same type of info in Player by Game table except will have additional data for time in game, potentially location on court if we have the x,y coordinates from tracking data, etc.
+
+
+<br>
+
+
+I believe this ER diagram is in the Third or Fourth Normal Form (it’s been awhile since my database courses…). Each table has a primary key, some have combination keys to create that primary key. This database design should allow you to query all the information you would want for any player or team or league. 
+
+
+
+***
+
+
+
+<br>
+
+
+
+# **Question 6:**
+
+
+
+**What experience, if any, do you have working with player location (coordinates) data?**
+
+***
+
+**Answer:**
+
+
+I have some experience working with player location data, NFL, NBA, and Soccer data. 
+
+
+<br>
+
+
+## NFL Location Data
+
+<br>
+
+The NFL opened up a competition last year called the Big Data Bowl where they released 6 weeks of NFL player tracking data publicly. I used that data to investigate route tree combination success. I also player around with comparing players by position with the mean, median, standard deviation, and total distance run per play and per game. I also created some visuals/gifs using the tracking data to view plays. While it feels cool to get the data organized and the field mapped out properly, there wasn’t much value added analytically by viewing the gifs. I’ve wanted to dive deeper into the data and am hoping that Michael Lopez opens up more of the data for us to use. 
+
+This year the Big Data Bowl was predicting yards run by a running back. He didn’t release the full play data, only a snapshot of every players position, orientation, and speed at the moment the ball was handed off. This data was also really interesting to get into but lack of time kept me from entering the contest.
+
+<br>
+
+
+### Sample Play Gifs w/ Code
+
+<br>
+
+#### **Alex Smith TD Pass vs The Patriots**
+
+
+```{r}
+# Load packages
+library(gganimate)
+library(cowplot)
+library(tidyverse)
+
+# Load NFL data
+file.tracking <- "https://raw.githubusercontent.com/nfl-football-ops/Big-Data-Bowl/master/Data/tracking_gameId_2017090700.csv"
+tracking.example <- read_csv(file.tracking)
+
+file.game <- "https://raw.githubusercontent.com/nfl-football-ops/Big-Data-Bowl/master/Data/games.csv"
+games.sum <- read_csv(file.game) 
+
+file.plays <- "https://raw.githubusercontent.com/nfl-football-ops/Big-Data-Bowl/master/Data/plays.csv"
+plays.sum <- read_csv(file.plays) 
+```
+
+
+```{r}
+# Join datasets
+tracking.example.merged <- tracking.example %>% 
+  inner_join(games.sum) %>% 
+  inner_join(plays.sum) 
+
+# filter to touchdown pass
+example.play <- tracking.example.merged %>% 
+  filter(playId == 938)
+```
+
+
+```{r}
+# view data
+head(example.play)
+```
+
+
+```{r}
+#### Plotting the data
+## General field boundaries
+xmin <- 0
+xmax <- 160/3
+hash.right <- 38.35
+hash.left <- 12
+hash.width <- 3.3
+
+
+## Specific boundaries for a given play
+ymin <- max(round(min(example.play$x, na.rm = TRUE) - 10, -1), 0)
+ymax <- min(round(max(example.play$x, na.rm = TRUE) + 10, -1), 120)
+df.hash <- expand.grid(x = c(0, 23.36667, 29.96667, xmax), y = (10:110))
+df.hash <- df.hash %>% filter(!(floor(y %% 5) == 0))
+df.hash <- df.hash %>% filter(y < ymax, y > ymin)
+
+# build visual
+animate.play <- ggplot() +
+  scale_size_manual(values = c(6, 4, 6), guide = FALSE) + 
+  scale_shape_manual(values = c(21, 16, 21), guide = FALSE) +
+  scale_fill_manual(values = c("#e31837", "#654321", "#002244"), guide = FALSE) + 
+  scale_colour_manual(values = c("black", "#654321", "#c60c30"), guide = FALSE) + 
+  annotate("text", x = df.hash$x[df.hash$x < 55/2], 
+           y = df.hash$y[df.hash$x < 55/2], label = "_", hjust = 0, vjust = -0.2) + 
+  annotate("text", x = df.hash$x[df.hash$x > 55/2], 
+           y = df.hash$y[df.hash$x > 55/2], label = "_", hjust = 1, vjust = -0.2) + 
+  annotate("segment", x = xmin, 
+           y = seq(max(10, ymin), min(ymax, 110), by = 5), 
+           xend =  xmax, 
+           yend = seq(max(10, ymin), min(ymax, 110), by = 5)) + 
+  annotate("text", x = rep(hash.left, 11), y = seq(10, 110, by = 10), 
+           label = c("G   ", seq(10, 50, by = 10), rev(seq(10, 40, by = 10)), "   G"), 
+           angle = 270, size = 4) + 
+  annotate("text", x = rep((xmax - hash.left), 11), y = seq(10, 110, by = 10), 
+           label = c("   G", seq(10, 50, by = 10), rev(seq(10, 40, by = 10)), "G   "), 
+           angle = 90, size = 4) + 
+  annotate("segment", x = c(xmin, xmin, xmax, xmax), 
+           y = c(ymin, ymax, ymax, ymin), 
+           xend = c(xmin, xmax, xmax, xmin), 
+           yend = c(ymax, ymax, ymin, ymin), colour = "black") + 
+  geom_point(data = example.play, aes(x = (xmax-y), y = x, shape = team,
+                                      fill = team, group = nflId, size = team, colour = team), alpha = 0.7) + 
+  geom_text(data = example.play, aes(x = (xmax-y), y = x, label = jerseyNumber), colour = "white", 
+            vjust = 0.36, size = 3.5) + 
+  ylim(ymin, ymax) + 
+  coord_fixed() +  
+  theme_nothing() + 
+  transition_time(frame.id)  +
+  ease_aes('linear') + 
+  NULL
+
+## Ensure timing of play matches 10 frames-per-second
+play.length.ex <- length(unique(example.play$frame.id))
+
+# view gif
+animate(animate.play, fps = 10, nframe = play.length.ex)
+```
+
+
+
+```{r}
+# view play description
+example.play %>% 
+  select(playDescription) %>% 
+  slice(1)
+```
+
+
+
+![](nfl_play1.gif)
+
+**3rd and Goal. Ball on the 7 yard line. TE Demetrius Harris runs a curl route. Alex smith rifles the ball in before the 2 defenders collapse down on the route.**
+
+***
+
+<br>
+
+
+#### **Another Alex Smith TD Pass vs The Patriots**
+
+
+```{r}
+# filter to long touchdown play
+example.play2 <- tracking.example.merged %>% 
+  filter(playId == 3725)
+```
+
+
+```{r}
+# view data
+head(example.play2)
+```
+
+
+```{r}
+#### Plotting the play
+
+## Specific boundaries for a given play
+ymin <- max(round(min(example.play2$x, na.rm = TRUE) - 10, -1), 0)
+ymax <- min(round(max(example.play2$x, na.rm = TRUE) + 10, -1), 120)
+df.hash <- expand.grid(x = c(0, 23.36667, 29.96667, xmax), y = (10:110))
+df.hash <- df.hash %>% filter(!(floor(y %% 5) == 0))
+df.hash <- df.hash %>% filter(y < ymax, y > ymin)
+
+
+# build visual
+animate.play2 <- ggplot() +
+  scale_size_manual(values = c(6, 4, 6), guide = FALSE) + 
+  scale_shape_manual(values = c(21, 16, 21), guide = FALSE) +
+  scale_fill_manual(values = c("#e31837", "#654321", "#002244"), guide = FALSE) + 
+  scale_colour_manual(values = c("black", "#654321", "#c60c30"), guide = FALSE) + 
+  annotate("text", x = df.hash$x[df.hash$x < 55/2], 
+           y = df.hash$y[df.hash$x < 55/2], label = "_", hjust = 0, vjust = -0.2) + 
+  annotate("text", x = df.hash$x[df.hash$x > 55/2], 
+           y = df.hash$y[df.hash$x > 55/2], label = "_", hjust = 1, vjust = -0.2) + 
+  annotate("segment", x = xmin, 
+           y = seq(max(10, ymin), min(ymax, 110), by = 5), 
+           xend =  xmax, 
+           yend = seq(max(10, ymin), min(ymax, 110), by = 5)) + 
+  annotate("text", x = rep(hash.left, 11), y = seq(10, 110, by = 10), 
+           label = c("G   ", seq(10, 50, by = 10), rev(seq(10, 40, by = 10)), "   G"), 
+           angle = 270, size = 4) + 
+  annotate("text", x = rep((xmax - hash.left), 11), y = seq(10, 110, by = 10), 
+           label = c("   G", seq(10, 50, by = 10), rev(seq(10, 40, by = 10)), "G   "), 
+           angle = 90, size = 4) + 
+  annotate("segment", x = c(xmin, xmin, xmax, xmax), 
+           y = c(ymin, ymax, ymax, ymin), 
+           xend = c(xmin, xmax, xmax, xmin), 
+           yend = c(ymax, ymax, ymin, ymin), colour = "black") + 
+  geom_point(data = example.play2, 
+             aes(x = (xmax-y), y = x, shape = team,
+                 fill = team, group = nflId, size = team, colour = team), 
+             alpha = 0.7) + 
+  geom_text(data = example.play2, aes(x = (xmax-y), y = x, label = jerseyNumber), 
+            colour = "white", vjust = 0.36, size = 3.5) + 
+  ylim(ymin, ymax) + 
+  coord_fixed() +  
+  theme_nothing() + 
+  transition_time(frame.id)  +
+  ease_aes('linear') + 
+  NULL
+
+## Ensure timing of play matches 10 frames-per-second
+play.length.ex2 <- length(unique(example.play2$frame.id))
+
+# view gif
+animate(animate.play2, fps = 10, nframe = play.length.ex2)
+```
+
+
+```{r}
+# view play description
+example.play2 %>% 
+  select(playDescription) %>% 
+  slice(1)
+```
+
+![](nfl_play2.gif)
+
+
+
+**Alex Smith was labeled a game manager but during his last few seasons with Andy Reid he became one of the most under the radar deep throwers. Here is a perfect dime 30 yards down field to RB Kareem Hunt.**
+
+<br>
+
+
+These gifs feel cool to create with code but honestly the actual highlight from the game does the play much more justice than this could ever do... The player tracking data is the goldrush in sports data science but figuring out how to capitalize on it is key. Derriving new metrics, aggregating by play types, aggregating the location data to detremine which players/teams are utilizing their players/schemes best, schemes by teams, route trees, and being able to roll the metrics up to see how they affect the final game result are all unexplored areas with tons of potential. 
+
+
+<br>
+
+## NBA Location Data
+
+I performed an analysis for Anthony So, leader of Basketball Operations for the Phoenix Suns several years ago, evaluating European teams/players focused on second chance opportunities several years ago. I was only given play by play data that included the x, y coordinates for a full season. I needed to transform and clean the data before I could begin doing any analysis. I was able to determine the probability of an offensive rebound by the location of the shot. I found which players and teams performed above and below average. I also created a visual showing the FG% of second chance shots by zone on the court.
+
+<br>
+
+![](ShotChart.jpg)
+
+
+<br>
+
+I have also used the NBA player tracking data a few years ago when it was publicly available to create a handful of little visuals/animations but nothing too spectacular. Mostly shot charts like you would see from Kirk Goldsberry in his book [SprawlBall](https://fivethirtyeight.com/features/how-mapping-shots-in-the-nba-changed-it-forever/) or else gifs showing the play.
+
+
+
+<br>
+
+
+## Soccer Location Data
+
+
+<br>
+
+
+The experience I have with soccer data was only this last week as I was playing around with the SoccerAction Python package from Question 4. I also found the Soccermatics package in R analyzing Statsbomb tracking data. I was able to replicate SoccerAction’s boosted algorithm to create the probability of scoring a goal and the probability of conceding a goal at the action play level. 
+
+<br>
+
+
+#### **Action Value Plot and Table**
+
+![](Soccer Plot1.png)
+
+![](Soccer Plot2.png)
+
+![](Soccer Plot3.png)
+
+
+
+<br>
+
+
+The Soccermatics package has nice functions to compute instantaneous distance moved (in metres), speed (in metres per second), and direction (in radians) between subsequent frames. This package integrates well with the Statsbomb player location datasets. 
+
+#### **Player Tracking Plot**
+
+
+```{r}
+library(soccermatics)
+
+subset(tromso, id == 8)[1:3600,] %>%
+  soccerPath(col = "red", theme = "grass", arrow = "r",
+             title = "Tromsø IL (vs. Strømsgodset, 3rd Nov 2013)",
+             subtitle = "Player #8 path (1' - 6')")
+```
+
+
+#### **Defensive Pressure Heatmap**
+
+```{r}
+statsbomb %>%
+  filter(type.name == "Pressure" & team.name == "France") %>% 
+  as.data.frame() %>% 
+  soccerHeatmap(x = "location.x", y = "location.y", xBins = 21, yBins = 14,
+                title = "France (vs Argentina, 30th June 2016)", 
+                subtitle = "Defensive pressure heatmap")
+```
+
+
+#### **Passing Heatmap**
+
+```{r}
+statsbomb %>%
+  filter(type.name == "Pass" & team.name == "France") %>% 
+  as.data.frame() %>% 
+  soccerHeatmap(x = "location.x", y = "location.y",
+                title = "France (vs Argentina, 30th June 2016)", 
+                subtitle = "Passing heatmap")
+```
+
+
+
+***
+
+<br>
+
+
+<br>
+
+
+<br>
+
+
+<br>
+
+<br>
+
+
+
+# **Appendix:**
+
+
+### **Question 1 Functions:**
+
+  1. **"scrape_game_ids"** - This function returns the NFL schedule (and results if the games have already been played) from the NFL website:  [http://www.nfl.com/schedules/2019/REG15.](http://www.nfl.com/schedules/2019/REG15)
+  2. **"create_game_json_url"** = Helper function for the previous function. This will get the url for the json data. 
+  3. **"create_game_html_url"** - Helper function for the first function. This will get the url for play by play data for each game.
+  4. **"convertTeamAbbreviation"** - This function will change an NFL team's name to its abbreviation.
+  5. **"cleanPercent"** - This function will remove the percent sign "%" from a given input.
+  6. **"get_data"** - This function will scrape, clean, and combine all the tables from the Pro Football Reference page: [https://www.pro-football-reference.com/years/2019/](https://www.pro-football-reference.com/years/2019/) (or any other year).
+  7. **"fix_headers1"** - Helper function for the "get_data" function. Some of the tables on the website have 2 headers. This will fix the tables and rename the columns.
+  8. **"fix_headers1"** - Helper function for the "get_data" function. This will rename the columns for the rest of the tables on the website.
+
+
+```{r}
+# Load libraries
+library("tidyverse")
+library("rvest")
+library("RJSONIO")
+library("scrapeR")
+library("RColorBrewer")
+library("corrplot")
+
+
+## load functions
+
+#' Scrape game ids for a given NFL season (either pre, regular, or post-season) 
+#' 
+#' This function returns all available game ids for a given season,
+#' with an option specifying which type of game ids to return (either the 
+#' pre, regular, or post season) as well as the weeks considered.
+#' 
+#' @param season Numeric 4-digit year associated with an NFL season
+#' @param type String indicating the type of game ids to find, must either be
+#' "pre", "reg", or "post" (default is "reg").
+#' @param weeks Numeric vector indicating which weeks of preseason (0 to 4 except
+#' for 2011 season without Hall of Fame game) or regular season games (1 to 17)
+#' to grab (default value of NULL corresponds to selecting all available weeks).
+#' @param teams String vector indicating which teams (based on the abbreviation)
+#' the function should grab game info for (default value of NULL corresponds to
+#' selecting all available teams).
+#' @return Data frame with columns containing the season type, game_id, week number (if
+#' pre or regular season), the year of the season, home team, away team, a variable
+#' indicating the state of the game (POST is over, PRE is before or during),
+#' game's url, and the home and away team scores if the game is over.
+#' @examples
+#' # Scraping all game ids from 2017 regular season:
+#' scrape_game_ids(2017) 
+#' @export
+
+scrape_game_ids <- function(season, type = "reg", weeks = NULL, teams = NULL) {
+  
+  # First check that the type is one of the required options:
+  assertthat::assert_that(tolower(type) %in% c("reg", "pre", "post"),
+                          msg = "Input for type is not valid! Should either be 'reg', 'pre', or 'post'.")
+  
+  # Next check that if the type is pre then the season is at least 1999:
+  if (tolower(type) == "pre") {
+    assertthat::assert_that(as.numeric(season) >= 2000,
+                            msg = "Preseason game ids with data are only available starting in 2000!")
+    # Otherwise check to see that it's at least 1998
+  } else {
+    assertthat::assert_that(as.numeric(season) >= 1998,
+                            msg = "Regular and post-season game ids with data are only available starting in 1998!")
+  }
+  
+  # Change the weeks from NULL if type is either pre or reg to their default values
+  # (catching the case for 2011)
+  
+  if (is.null(weeks) & tolower(type) == "pre" & season != 2011) {
+    weeks <- 0:4
+  }
+  if (is.null(weeks) & tolower(type) == "pre" & season == 2011) {
+    weeks <- 1:4
+  }
+  if (is.null(weeks) & tolower(type) == "reg") {
+    weeks <- 1:17
+  }
+  
+  # Print out a message if the user entired values for weeks but for post type:
+  if (!is.null(weeks) & tolower(type) == "post") {
+    print("Ignoring the weeks input given the selected post-season game type.")
+  }
+  
+  # Next check to see that if the type is pre then all of the weeks are between
+  # 0 to 4, or 1 to 4 if season is 2011:
+  if (tolower(type) == "pre" & season != 2011) {
+    assertthat::assert_that(all(weeks >= 0) & all(weeks <= 4),
+                            msg = "Please enter appropriate values for the pre-season weeks input between 0 to 4!")
+  }
+  if (tolower(type) == "pre" & season == 2011) {
+    assertthat::assert_that(all(weeks >= 1) & all(weeks <= 4),
+                            msg = "Please enter appropriate values for the 2011 pre-season weeks input between 1 to 4!")
+  }
+  
+  # For regular season between 1 and 17:
+  if (tolower(type) == "reg") {
+    assertthat::assert_that(all(weeks >= 1) & all(weeks <= 17),
+                            msg = "Please enter appropriate values for the regular season weeks input between 1 to 17!")
+  }
+  
+  # Construct base schedule url for the season and type:
+  base_url_schedule <- paste("http://www.nfl.com/schedules", season,
+                             toupper(type), sep = "/")
+  
+  # Define the pipeline that will be used for type of games to scrape:
+  
+  fetch_game_ids <- . %>%
+    scrapeR::scrape(url = ., headers = TRUE, parse = FALSE) %>%
+    unlist() %>%
+    stringr::str_extract_all("data-gameid=\"[0-9]{10}\"") %>%
+    unlist() %>%
+    stringr::str_extract("[0-9]{10}") %>%
+    unlist()
+  
+  # Pipeline to get away team abbreviations:
+  fetch_away_team_id <- . %>%
+    scrapeR::scrape(url = ., headers = TRUE, parse = FALSE) %>%
+    unlist() %>%
+    stringr::str_extract_all("data-away-abbr=\"[:upper:]{2,3}\"") %>%
+    unlist() %>%
+    stringr::str_extract("[:upper:]{2,3}") %>%
+    unlist()
+  
+  # Home team abbreviations:
+  fetch_home_team_id <- . %>%
+    scrapeR::scrape(url = ., headers = TRUE, parse = FALSE) %>%
+    unlist() %>%
+    stringr::str_extract_all("data-home-abbr=\"[:upper:]{2,3}\"") %>%
+    unlist() %>%
+    stringr::str_extract("[:upper:]{2,3}") %>%
+    unlist()
+  
+  # Pipeline to fetch state of game:
+  fetch_gamestate <- . %>%
+    scrapeR::scrape(url = ., headers = TRUE, parse = FALSE) %>%
+    unlist() %>%
+    stringr::str_extract_all("data-gamestate=\"[:upper:]{2,4}\"") %>%
+    unlist() %>%
+    stringr::str_extract("[:upper:]{2,4}") %>%
+    unlist()
+  
+  
+  # If the type is post then just gather all the game ids from the post season
+  # schedule page (since they are not separated by the week unlike the pre or
+  # regular season) and put them together in data frame with week as 18 for now:
+  
+  if (tolower(type) == "post") {
+    
+    playoff_game_ids <- base_url_schedule %>%
+      fetch_game_ids
+    
+    playoff_game_home <- base_url_schedule %>%
+      fetch_home_team_id
+    playoff_game_away <- base_url_schedule %>%
+      fetch_away_team_id
+    playoff_gamestate <- base_url_schedule %>%
+      fetch_gamestate
+    
+    game_ids_df <- data.frame("game_id" = playoff_game_ids,
+                              "week" = rep(18, length(playoff_game_ids)),
+                              "home_team" = playoff_game_home,
+                              "away_team" = playoff_game_away,
+                              "state_of_game" = playoff_gamestate)
+    
+    # Else need to do it by the given weeks for the pre and regular season
+  } else {
+    
+    # Now apply the pipeline to each week returning a data frame of game ids with
+    # a column containing the week
+    game_ids_df <- suppressWarnings(purrr::map_dfr(weeks, function(x) {
+      game_ids <- paste0(base_url_schedule, x) %>%
+        fetch_game_ids
+      game_home <- paste0(base_url_schedule, x) %>%
+        fetch_home_team_id
+      game_away <- paste0(base_url_schedule, x) %>%
+        fetch_away_team_id
+      gamestate <- paste0(base_url_schedule, x) %>%
+        fetch_gamestate
+      data.frame("game_id" = game_ids,
+                 "week" = rep(x, length(game_ids)),
+                 "home_team" = game_home,
+                 "away_team" = game_away,
+                 "state_of_game" = gamestate)
+    }))
+  }
+  
+  # If teams is not null, check to make sure that there are games with
+  # the given teams as either home or away and filter down to only
+  # include those:
+  if (!is.null(teams)) {
+    assertthat::assert_that(any(teams %in% game_ids_df$home_team |
+                                  teams %in% game_ids_df$away_team),
+                            msg = "There are no games available for your entered team(s)!")
+    game_ids_df <- game_ids_df %>%
+      dplyr::filter(home_team %in% teams | away_team %in% teams)
+  }
+  
+  
+  # Return the game ids in a data frame with columns for the season and type:
+  game_ids_df %>%
+    dplyr::mutate(type = rep(type, nrow(game_ids_df)),
+                  season = rep(season, nrow(game_ids_df))) %>%
+    dplyr::select(type, game_id, home_team, away_team, week, season, state_of_game) %>%
+    as.data.frame() %>%
+    # Due to how the NFL displays Thursday Night Football games, only use 
+    # the distinct rows:
+    dplyr::distinct() %>%
+    # Next create a variable with the url for each game:
+    dplyr::mutate(game_url = sapply(game_id, create_game_json_url),
+                  # Now for each game, if it is over based on the
+                  # state_of_game field then access the scores of the
+                  # game for the home and away teams:
+                  home_score = purrr::map2_dbl(game_url, state_of_game,
+                                               .f = function(x, y) {
+                                                 ifelse(y == "POST",
+                                                        max(RJSONIO::fromJSON(RCurl::getURL(x))[[1]]$home$score),
+                                                        NA)
+                                               }),
+                  away_score = purrr::map2_dbl(game_url, state_of_game,
+                                               .f = function(x, y) {
+                                                 ifelse(y == "POST",
+                                                        max(RJSONIO::fromJSON(RCurl::getURL(x))[[1]]$away$score),
+                                                        NA)
+                                               })) %>%
+    return
+}
+
+#' Create the url with the location of NFL game JSON data
+#' 
+#' This function pastes creates the JSON url for the provided game id (first 
+#' checking that it is from the 2009 season or later). The returned url is used
+#' in the various play-by-play functions to access data from the NFL's API.
+#' 
+#' @param game_id (character or numeric) A 10 digit game id associated with a 
+#' given NFL game.
+#' @return String url where the game JSON data for the given game can be found.
+#' @examples
+#' # Create the JSON url for the first game of the 2017 season:
+#' create_game_json_url(2017090700) 
+#' @export
+
+create_game_json_url <- function(game_id) {
+  
+  # First check to make sure that the first six digits of the game id are at
+  # least 200904 (meaning they're at least from the 2009 season and have data
+  # from the NFL API):
+  assertthat::assert_that(as.numeric(stringr::str_sub(as.character(game_id), 1, 6)) > 200904,
+                          msg = "You entered an invalid game id! JSON urls are supported starting with the 2009 season.")
+  
+  # Paste together the proper location of the JSON data
+  paste0("http://www.nfl.com/liveupdate/game-center/", game_id, "/",
+         game_id, "_gtd.json")
+}
+
+
+#' Create the url with the location of raw NFL play-by-play HTML
+#' 
+#' This function pastes creates the url for the provided game id. The returned 
+#' url is used in the various play-by-play functions to access play-by-play data
+#' from the raw HTML page.
+#' 
+#' @param game_id (character or numeric) A 10 digit game id associated with a 
+#' given NFL game.
+#' @return String url where the raw HTML play-by-play data can be found (going 
+#' back to 1998 for regular season, 2000 for pre season).
+#' @examples
+#' # Create the JSON url for the first game of the 1998 season:
+#' create_game_html_url(2017090700) 
+#' @export
+
+create_game_html_url <- function(game_id) {
+  
+  # First check to make sure that the first six digits of the game id are at
+  # least 199804 (meaning they're at least from the 1998 season and have raw
+  # HTML play-by-play:
+  assertthat::assert_that(as.numeric(stringr::str_sub(as.character(game_id), 1, 6)) > 199804,
+                          msg = "You entered an invalid game id! Raw HTML urls are supported starting with the 1998 season.")
+  
+  # Paste together the proper location of the raw HTML play-by-play data
+  paste0("http://www.nfl.com/widget/gc/2011/tabs/cat-post-playbyplay?gameId=", 
+         game_id, "&enableNGS=false")
+}
+
+
+
+#Convert cities/nicknames to team abbreviations
+convertTeamAbbreviation <- function(x){
+  x[grep("Arizona", x, ignore.case=TRUE)] <- "ARZ"
+  x[grep("Cardinals", x, ignore.case=TRUE)] <- "ARZ"
+  x[grep("ARI", x, ignore.case=TRUE)] <- "ARZ"
+  
+  x[grep("Atlanta", x, ignore.case=TRUE)] <- "ATL"
+  x[grep("Falcons", x, ignore.case=TRUE)] <- "ATL"
+  
+  x[grep("Baltimore", x, ignore.case=TRUE)] <- "BAL"
+  x[grep("Ravens", x, ignore.case=TRUE)] <- "BAL"
+  
+  x[grep("Buffalo", x, ignore.case=TRUE)] <- "BUF"
+  x[grep("Bills", x, ignore.case=TRUE)] <- "BUF"
+  
+  x[grep("Carolina", x, ignore.case=TRUE)] <- "CAR"
+  x[grep("Panthers", x, ignore.case=TRUE)] <- "CAR"
+  
+  x[grep("Chicago", x, ignore.case=TRUE)] <- "CHI"
+  x[grep("Bears", x, ignore.case=TRUE)] <- "CHI"
+  
+  x[grep("Cincinnati", x, ignore.case=TRUE)] <- "CIN"
+  x[grep("Bengals", x, ignore.case=TRUE)] <- "CIN"
+  
+  x[grep("Cleveland", x, ignore.case=TRUE)] <- "CLE"
+  x[grep("Browns", x, ignore.case=TRUE)] <- "CLE"
+  
+  x[grep("Dallas", x, ignore.case=TRUE)] <- "DAL"
+  x[grep("Cowboys", x, ignore.case=TRUE)] <- "DAL"
+  
+  x[grep("Denver", x, ignore.case=TRUE)] <- "DEN"
+  x[grep("Broncos", x, ignore.case=TRUE)] <- "DEN"
+  
+  x[grep("Detroit", x, ignore.case=TRUE)] <- "DET"
+  x[grep("Lions", x, ignore.case=TRUE)] <- "DET"
+  
+  x[grep("Free", x, ignore.case=TRUE)] <- "FA"
+  x[grep("Agent", x, ignore.case=TRUE)] <- "FA"
+  
+  x[grep("Green Bay", x, ignore.case=TRUE)] <- "GB"
+  x[grep("Packers", x, ignore.case=TRUE)] <- "GB"
+  
+  x[grep("Houston", x, ignore.case=TRUE)] <- "HOU"
+  x[grep("Texans", x, ignore.case=TRUE)] <- "HOU"
+  
+  x[grep("Indianapolis", x, ignore.case=TRUE)] <- "IND"
+  x[grep("Colts", x, ignore.case=TRUE)] <- "IND"
+  
+  x[grep("Jacksonville", x, ignore.case=TRUE)] <- "JAX"
+  x[grep("Jaguars", x, ignore.case=TRUE)] <- "JAX"
+  
+  x[grep("Kansas City", x, ignore.case=TRUE)] <- "KC"
+  x[grep("Chiefs", x, ignore.case=TRUE)] <- "KC"
+  
+  x[grep("Miami", x, ignore.case=TRUE)] <- "MIA"
+  x[grep("Dolphins", x, ignore.case=TRUE)] <- "MIA"
+  
+  x[grep("Minnesota", x, ignore.case=TRUE)] <- "MIN"
+  x[grep("Vikings", x, ignore.case=TRUE)] <- "MIN"
+  
+  x[grep("New England", x, ignore.case=TRUE)] <- "NE"
+  x[grep("Patriots", x, ignore.case=TRUE)] <- "NE"
+  
+  x[grep("New Orleans", x, ignore.case=TRUE)] <- "NO"
+  x[grep("Saints", x, ignore.case=TRUE)] <- "NO"
+  
+  x[grep("Jets", x, ignore.case=TRUE)] <- "NYJ"
+  
+  x[grep("Giants", x, ignore.case=TRUE)] <- "NYG"
+  
+  x[grep("Oakland", x, ignore.case=TRUE)] <- "OAK"
+  x[grep("Raiders", x, ignore.case=TRUE)] <- "OAK"
+  
+  x[grep("Philadelphia", x, ignore.case=TRUE)] <- "PHI"
+  x[grep("Eagles", x, ignore.case=TRUE)] <- "PHI"
+  
+  x[grep("Pittsburgh", x, ignore.case=TRUE)] <- "PIT"
+  x[grep("Steelers", x, ignore.case=TRUE)] <- "PIT"
+  
+  x[grep("San Diego", x, ignore.case=TRUE)] <- "LAC"
+  x[grep("Chargers", x, ignore.case=TRUE)] <- "LAC"
+  x[grep("L.A. Chargers", x, ignore.case=TRUE)] <- "LAC"
+  
+  
+  x[grep("Saint Louis", x, ignore.case=TRUE)] <- "LAR"
+  x[grep("St Louis", x, ignore.case=TRUE)] <- "LAR"
+  x[grep("St. Louis", x, ignore.case=TRUE)] <- "LAR"
+  x[grep("Rams", x, ignore.case=TRUE)] <- "LAR"
+  x[grep("L.A. Rams", x, ignore.case=TRUE)] <- "LAR"
+  
+  x[grep("San Francisco", x, ignore.case=TRUE)] <- "SF"
+  x[grep("49ers", x, ignore.case=TRUE)] <- "SF"
+  
+  x[grep("Seattle", x, ignore.case=TRUE)] <- "SEA"
+  x[grep("Seahawks", x, ignore.case=TRUE)] <- "SEA"
+  
+  x[grep("Tampa Bay", x, ignore.case=TRUE)] <- "TB"
+  x[grep("Buccaneers", x, ignore.case=TRUE)] <- "TB"
+  
+  x[grep("Tennessee", x, ignore.case=TRUE)] <- "TEN"
+  x[grep("Titans", x, ignore.case=TRUE)] <- "TEN"
+  
+  x[grep("Washington", x, ignore.case=TRUE)] <- "WAS"
+  x[grep("Redskins", x, ignore.case=TRUE)] <- "WAS"
+  
+  return(x)
+}
+
+
+
+## gets rid of percent sign in the dataframes
+cleanPercent <- function(x) {gsub("\\%", "", x)}
+
+# Scrape Pro Football Reference Website
+get_data <- function(url){
+  ## basic scrape has most the tables hidden so a work around is used
+  # data = basic scrape
+  # data1 = more complicated work around for hidden tables
+  
+  # Get the first 2 tables 
+  data <- read_html(url) %>%
+    html_table(fill = TRUE)
+  
+  # 1. AFC Standings
+  AFC <- data[[1]] %>% 
+    filter(!str_detect(Tm, "AFC"))
+  
+  # 2. NFC Standings
+  NFC <- data[[2]] %>% 
+    filter(!str_detect(Tm, "NFC"))
+  
+  # combine AFC & NFC tables
+  Teams <- rbind(AFC, NFC)
+  
+  # grab the last 10 tables
+  data1 <- read_html(url) %>%
+    html_nodes(xpath = '//comment()') %>%
+    html_text() %>% 
+    paste(collapse = "") %>%
+    read_html() %>%
+    html_table(fill = TRUE)
+  
+  # 5. Team Offense
+  team_offense <- data1[[3]] %>%
+    fix_headers1(df_name = "tm_off")
+  
+  # 6. Passing Offense
+  pass_offense <- data1[[4]] %>%
+    fix_headers2(df_name = "pass_off")
+  
+  # 7. Rushing Offense
+  rush_offense <- data1[[5]] %>%
+    fix_headers2(df_name = "rush_off")
+  
+  # 8. Kick & Punt Returns
+  kick_returns <- data1[[6]] %>%
+    fix_headers1(df_name = "return")
+  
+  # 9. Kicking & Punting
+  kicking <- data1[[7]] %>%
+    fix_headers1(df_name = "kick")
+  
+  # 10. Scoring Offense
+  scoring <- data1[[8]] %>%
+    fix_headers2(df_name = "score")
+  
+  # 11. Conversions
+  conversion <- data1[[9]] %>%
+    fix_headers1(df_name = "conv")
+  
+  # 12. Drive Averages
+  drives <- data1[[10]] %>% 
+    fix_headers1(df_name = "drive") %>% 
+    mutate(`drive_Average Drive_Start` = gsub("Own ", "", `drive_Average Drive_Start`))
+  
+  # Join all the data together
+  full_data <- Teams %>% 
+    left_join(team_offense, by = c("Tm" = "tm_off_Tm")) %>% 
+    left_join(pass_offense, by = c("Tm" = "pass_off_Tm")) %>% 
+    left_join(rush_offense, by = c("Tm" = "rush_off_Tm")) %>% 
+    left_join(kick_returns, by = c("Tm" = "return_Tm")) %>% 
+    left_join(kicking, by = c("Tm" = "kick_Tm")) %>% 
+    left_join(scoring, by = c("Tm" = "score_Tm")) %>% 
+    left_join(conversion, by = c("Tm" = "conv_Tm")) %>% 
+    left_join(drives, by = c("Tm" = "drive_Tm")) %>% 
+    replace(., is.na(.), 0) 
+  
+  # remove percent sign
+  full_data[, 2:length(full_data)] <- sapply(full_data[, 2:length(full_data)], cleanPercent)
+  
+  # change to numeric data
+  full_data[, 2:length(full_data)] <- sapply(full_data[, 2:length(full_data)], as.numeric)
+  
+  # NAs are zeros on the website. Change missing to 0
+  full_data <- full_data %>% 
+    replace(., is.na(.), 0) 
+  
+  return(full_data)
+}
+
+
+# function to fix column names
+fix_headers1 <- function(dataframe, df_name){
+  headers <- colnames(dataframe)
+  new_head <- dataframe[1,]
+  headers <- unlist(ifelse(headers == "", new_head, paste0(headers, "_", new_head)))
+  headers <- paste0(df_name, "_", headers)
+  colnames(dataframe) <- headers
+  dataframe <- dataframe[-1,]
+  return(dataframe)
+}
+
+# function to fix column names
+fix_headers2 <- function(dataframe, df_name){
+  headers <- colnames(dataframe)
+  headers <- paste0(df_name, "_", headers)
+  if (df_name == "pass_off") {
+    headers[19] <- "pass_off_sack_yds"
+  }
+  colnames(dataframe) <- headers
+  return(dataframe)
+}
+
+
+## GGPLOT THEME to plot monte carlo results
+theme_538 <- function(base_size = 12, font = "Impact") {
+  
+  # Text setting
+  txt <- element_text(size = base_size + 2, colour = "black", face = "plain")
+  bold_txt <- element_text(
+    size = base_size + 2, colour = "black",
+    family = "Impact", face = "bold"
+  )
+  large_txt <- element_text(size = base_size + 4, color = "black", face = "bold")
+  
+  
+  theme_minimal(base_size = base_size, base_family = font) +
+    theme(
+      # Legend Settings
+      legend.key = element_blank(),
+      legend.background = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.box = "vertical",
+      
+      # Backgrounds
+      strip.background = element_blank(),
+      strip.text = large_txt,
+      plot.background = element_blank(),
+      plot.margin = unit(c(1, 1, 1, 1), "lines"),
+      
+      # Axis & Titles
+      text = txt,
+      axis.text = txt,
+      axis.ticks = element_blank(),
+      axis.line = element_blank(),
+      axis.title = bold_txt,
+      plot.title = large_txt,
+      
+      # Panel
+      panel.grid = element_line(colour = NULL),
+      panel.grid.major = element_line(colour = "#D2D2D2"),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      panel.border = element_blank()
+    )
+}
+
+# get team colors for plots
+library(teamcolors)
+nfl_colors <- teamcolors %>% 
+  filter(league == "nfl") %>% 
+  mutate(name = convertTeamAbbreviation(name))
+
+home_colors <- nfl_colors
+away_colors <- nfl_colors
+
+# rename columns home and away team colors
+names <- colnames(nfl_colors)
+home_names <- paste0("home_", names)
+away_names <- paste0("away_", names)
+colnames(home_colors) <- home_names
+colnames(away_colors) <- away_names
+```
+
