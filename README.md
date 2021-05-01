@@ -32,3 +32,6 @@ spending some time in all of those four places, have many seasons of data associ
 also have non game playing metrics that might be of interest.
 
 6. What experience, if any, do you have working with player location (coordinates) data?
+
+
+TODO: Run instructions
